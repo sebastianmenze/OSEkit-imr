@@ -53,6 +53,8 @@ class Dataset:
         datasets: dict | None = None,
         job_builder: JobBuilder | None = None,
         instrument: Instrument | None = None,
+        file_list: list[Path] | None = None,
+        move_files: bool = True,
     ) -> None:
         """Initialize a Dataset.
 
@@ -94,6 +96,8 @@ class Dataset:
         self.datasets = datasets if datasets is not None else {}
         self.job_builder = job_builder
         self.instrument = instrument
+        self.file_list = file_list
+        self.move_files = move_files        
 
     @property
     def origin_files(self) -> list[AudioFile] | None:
@@ -116,15 +120,136 @@ class Dataset:
 
     def build(self) -> None:
         """Build the Dataset.
-
-        Building a dataset moves the original audio files to a specific folder
-        and creates metadata csv used by APLOSE.
-
+  
+        Building a dataset creates metadata for the audio files.
+        If move_files is True (default), it moves the original audio files to
+        a specific folder and creates metadata csv used by APLOSE.
+        If file_list is provided, files are analyzed from their current locations.
+  
         """
         self._create_logger()
-
+  
         self.logger.info("Building the dataset...")
+  
+        self.logger.info("Analyzing original audio files...")
+        
+        # Use file_list if provided, otherwise scan folder
+        if self.file_list is not None:
+            # Create AudioDataset from file list
+            from osekit.core_api.audio_file import AudioFile
+            audio_files = [
+                AudioFile(
+                    path=file_path,
+                    strptime_format=self.strptime_format,
+                    timezone=self.timezone,
+                    # instrument=self.instrument,
+                )
+                for file_path in self.file_list
+            ]
+            ads = AudioDataset.from_files(
+                files=audio_files,
+                name="original",
+                mode="files",
+            )
+            
+            
+            # Set folder to output location
+            ads.folder = self.folder / "data" / "audio" / "original"
+        else:
+            # Original behavior: scan folder
+            ads = AudioDataset.from_folder(
+                self.folder,
+                strptime_format=self.strptime_format,
+                mode="files",
+                timezone=self.timezone,
+                name="original",
+                instrument=self.instrument,
+            )
+        
+        self.datasets[ads.name] = {
+            "class": type(ads).__name__,
+            "analysis": "original",
+            "dataset": ads,
+        }
+  
+        # Only move/organize files if move_files is True
+        if self.move_files:
+            self.logger.info("Organizing dataset folder...")
+            move_tree(
+                source=self.folder,
+                destination=self.folder / "other",
+                excluded_paths={file.path for file in ads.files}
+                | set(
+                    (self.folder / "log").iterdir()
+                    if (self.folder / "log").exists()
+                    else ()
+                )
+                | {self.folder / "log"},
+            )
+            self._sort_dataset(ads)
+        
+        # Always write metadata
+        ads.folder.mkdir(parents=True, exist_ok=True)
+        ads.write_json(ads.folder)
+        self.write_json()
+  
+        self.logger.info("Build done!")
 
+    # def build(self) -> None:
+    #     """Build the Dataset.
+
+    #     Building a dataset moves the original audio files to a specific folder
+    #     and creates metadata csv used by APLOSE.
+
+    #     """
+    #     self._create_logger()
+
+    #     self.logger.info("Building the dataset...")
+
+    #     self.logger.info("Analyzing original audio files...")
+    #     ads = AudioDataset.from_folder(
+    #         self.folder,
+    #         strptime_format=self.strptime_format,
+    #         mode="files",
+    #         timezone=self.timezone,
+    #         name="original",
+    #         instrument=self.instrument,
+    #     )
+    #     self.datasets[ads.name] = {
+    #         "class": type(ads).__name__,
+    #         "analysis": "original",
+    #         "dataset": ads,
+    #     }
+
+    #     self.logger.info("Organizing dataset folder...")
+    #     move_tree(
+    #         source=self.folder,
+    #         destination=self.folder / "other",
+    #         excluded_paths={file.path for file in ads.files}
+    #         | set(
+    #             (self.folder / "log").iterdir()
+    #             if (self.folder / "log").exists()
+    #             else (),
+    #         )
+    #         | {self.folder / "log"},
+    #     )
+    #     self._sort_dataset(ads)
+    #     ads.write_json(ads.folder)
+    #     self.write_json()
+
+    #     self.logger.info("Build done!")
+        
+    def build_nocopy_fromfiles(self) -> None:
+        """Build the Dataset.
+    
+        Building a dataset moves the original audio files to a specific folder
+        and creates metadata csv used by APLOSE.
+    
+        """
+        self._create_logger()
+    
+        self.logger.info("Building the dataset...")
+    
         self.logger.info("Analyzing original audio files...")
         ads = AudioDataset.from_folder(
             self.folder,
@@ -139,7 +264,7 @@ class Dataset:
             "analysis": "original",
             "dataset": ads,
         }
-
+    
         self.logger.info("Organizing dataset folder...")
         move_tree(
             source=self.folder,
@@ -155,8 +280,9 @@ class Dataset:
         self._sort_dataset(ads)
         ads.write_json(ads.folder)
         self.write_json()
-
+    
         self.logger.info("Build done!")
+
 
     def _create_logger(self) -> None:
         if not logging.getLogger("dataset").handlers:
