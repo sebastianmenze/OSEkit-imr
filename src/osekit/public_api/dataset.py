@@ -123,9 +123,10 @@ class Dataset:
   
         Building a dataset creates metadata for the audio files.
         If move_files is True (default), it moves the original audio files to
-        a specific folder and creates metadata csv used by APLOSE.
-        If file_list is provided, files are analyzed from their current locations.
-  
+        a structure created by osekit dataset. If file_list is provided, files 
+        are analyzed from their current locations. if folder is provided the
+        folder is scanned as in original function
+
         """
         self._create_logger()
   
