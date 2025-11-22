@@ -2,6 +2,8 @@
 
 AudioDataset is a collection of AudioData, with methods
 that simplify repeated operations on the audio data.
+
+MODIFIED: Added error handling to skip corrupted/problematic audio files.
 """
 
 from __future__ import annotations
@@ -9,6 +11,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
+
+from soundfile import LibsndfileError
 
 from osekit.core_api.audio_data import AudioData
 from osekit.core_api.audio_file import AudioFile
@@ -22,6 +26,11 @@ if TYPE_CHECKING:
     from pandas import Timedelta, Timestamp
 
     from osekit.core_api.instrument import Instrument
+
+
+# Configure logging to show warnings
+logging.basicConfig(level=logging.WARNING)
+logger = logging.getLogger(__name__)
 
 
 class AudioDataset(BaseDataset[AudioData, AudioFile]):
@@ -102,10 +111,35 @@ class AudioDataset(BaseDataset[AudioData, AudioFile]):
         folder: Path,
         subtype: str | None = None,
         link: bool = False,  # noqa: FBT001, FBT002,
-    ) -> AudioData:
-        """Write audio data to disk."""
-        data.write(folder=folder, subtype=subtype, link=link)
-        return data
+    ) -> AudioData | None:
+        """Write audio data to disk.
+        
+        MODIFIED: Now catches errors and returns None for failed writes.
+        """
+        try:
+            data.write(folder=folder, subtype=subtype, link=link)
+            return data
+        except (LibsndfileError, OSError, IOError, ValueError) as e:
+            # Get file info for logging
+            file_info = "unknown"
+            try:
+                if data.files:
+                    file_info = ", ".join(str(f.path) for f in data.files)
+            except Exception:
+                pass
+            
+            logger.warning(
+                f"Skipping audio data due to error: {type(e).__name__}: {e}\n"
+                f"  Files involved: {file_info}\n"
+                f"  Time range: {data.begin} to {data.end}"
+            )
+            return None
+        except Exception as e:
+            # Catch any other unexpected errors
+            logger.warning(
+                f"Unexpected error processing audio data: {type(e).__name__}: {e}"
+            )
+            return None
 
     def write(
         self,
@@ -114,6 +148,7 @@ class AudioDataset(BaseDataset[AudioData, AudioFile]):
         link: bool = False,  # noqa: FBT001, FBT002,
         first: int = 0,
         last: int | None = None,
+        skip_errors: bool = True,  # NEW PARAMETER
     ) -> None:
         """Write all data objects in the specified folder.
 
@@ -132,17 +167,53 @@ class AudioDataset(BaseDataset[AudioData, AudioFile]):
             Index of the first AudioData object to write.
         last: int | None
             Index after the last AudioData object to write.
-
+        skip_errors: bool
+            If True (default), skip files that cause errors and continue processing.
+            If False, raise exceptions on error (original behavior).
 
         """
         last = len(self.data) if last is None else last
-        self.data[first:last] = multiprocess(
-            func=self._write_audio,
-            enumerable=self.data[first:last],
-            folder=folder,
-            subtype=subtype,
-            link=link,
-        )
+        
+        if skip_errors:
+            # Use error-tolerant processing
+            results = multiprocess(
+                func=self._write_audio,
+                enumerable=self.data[first:last],
+                folder=folder,
+                subtype=subtype,
+                link=link,
+            )
+            
+            # Filter out None results (failed writes) and count errors
+            successful_results = []
+            error_count = 0
+            for i, result in enumerate(results):
+                if result is not None:
+                    successful_results.append(result)
+                else:
+                    error_count += 1
+            
+            if error_count > 0:
+                logger.warning(
+                    f"Completed with {error_count} errors out of {last - first} files. "
+                    f"Successfully processed {len(successful_results)} files."
+                )
+            
+            # Update only successfully processed data
+            # Note: This changes the dataset size if errors occurred
+            self.data[first:first + len(successful_results)] = successful_results
+            if error_count > 0:
+                # Remove the extra slots from failed writes
+                del self.data[first + len(successful_results):last]
+        else:
+            # Original behavior - will raise on error
+            self.data[first:last] = multiprocess(
+                func=self._write_audio,
+                enumerable=self.data[first:last],
+                folder=folder,
+                subtype=subtype,
+                link=link,
+            )
 
     @classmethod
     def from_dict(cls, dictionary: dict) -> AudioDataset:
@@ -175,7 +246,6 @@ class AudioDataset(BaseDataset[AudioData, AudioFile]):
         end: Timestamp | None = None,
         timezone: str | pytz.timezone | None = None,
         mode: Literal["files", "timedelta_total", "timedelta_file"] = "timedelta_total",
-        overlap: float = 0.0,
         data_duration: Timedelta | None = None,
         sample_rate: float | None = None,
         name: str | None = None,
@@ -212,8 +282,6 @@ class AudioDataset(BaseDataset[AudioData, AudioFile]):
             be created from the beginning of the first file that the begin timestamp is into, until it would resume
             in a data beginning between two files. Then, the next data object will be created from the
             beginning of the next original file and so on.
-        overlap: float
-            Overlap percentage between consecutive data.
         data_duration: Timedelta | None
             Duration of the audio data objects.
             If mode is set to "files", this parameter has no effect.
@@ -247,7 +315,6 @@ class AudioDataset(BaseDataset[AudioData, AudioFile]):
             end=end,
             timezone=timezone,
             mode=mode,
-            overlap=overlap,
             data_duration=data_duration,
             **kwargs,
         )
@@ -266,7 +333,6 @@ class AudioDataset(BaseDataset[AudioData, AudioFile]):
         begin: Timestamp | None = None,
         end: Timestamp | None = None,
         mode: Literal["files", "timedelta_total", "timedelta_file"] = "timedelta_total",
-        overlap: float = 0.0,
         data_duration: Timedelta | None = None,
         sample_rate: float | None = None,
         name: str | None = None,
@@ -294,8 +360,6 @@ class AudioDataset(BaseDataset[AudioData, AudioFile]):
             be created from the beginning of the first file that the begin timestamp is into, until it would resume
             in a data beginning between two files. Then, the next data object will be created from the
             beginning of the next original file and so on.
-        overlap: float
-            Overlap percentage between consecutive data.
         data_duration: Timedelta | None
             Duration of the data objects.
             If mode is set to "files", this parameter has no effect.
@@ -322,7 +386,6 @@ class AudioDataset(BaseDataset[AudioData, AudioFile]):
             begin=begin,
             end=end,
             mode=mode,
-            overlap=overlap,
             data_duration=data_duration,
         )
         return cls.from_base_dataset(
@@ -346,9 +409,7 @@ class AudioDataset(BaseDataset[AudioData, AudioFile]):
         return cls(
             [
                 AudioData.from_base_data(
-                    data=data,
-                    sample_rate=sample_rate,
-                    normalization=normalization,
+                    data=data, sample_rate=sample_rate, normalization=normalization
                 )
                 for data in base_dataset.data
             ],
@@ -371,10 +432,4 @@ class AudioDataset(BaseDataset[AudioData, AudioFile]):
             The deserialized AudioDataset.
 
         """
-        # I have to redefine this method (without overriding it)
-        # for the type hint to be correct.
-        # It seems to be due to BaseData being a Generic class, following which
-        # AudioData.from_json() is supposed to return a BaseData
-        # without this duplicate definition...
-        # I might look back at all this in the future
         return cls.from_dict(deserialize_json(file))
